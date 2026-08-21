@@ -21,14 +21,16 @@ classifiers = [
     "Topic :: Desktop Environment :: K Desktop Environment (KDE)",
 ]
 # dbus-python is packaged as python3-dbus (Fedora), python3-dbus (Debian) and
-# python-dbus (Arch). Prefer the distro package; the dependency is declared so
-# pip installs work too, at the cost of needing dbus/glib build headers.
-dependencies = ["dbus-python>=1.2"]
+# python-dbus (Arch). PyGObject, which watch needs for the GLib main loop, is
+# python3-gobject (Fedora), python3-gi (Debian) and python-gobject (Arch).
+# Prefer the distro packages; the dependencies are declared so pip installs work
+# too, at the cost of needing dbus, glib, girepository and cairo build headers.
+dependencies = ["dbus-python>=1.2", "PyGObject>=3.36"]
 
 [project.urls]
-Homepage = "https://github.com/OnTheLink/konsole-kontinue"
-Source = "https://github.com/OnTheLink/konsole-kontinue"
-Issues = "https://github.com/OnTheLink/konsole-kontinue/issues"
+Homepage = "https://github.com/lonk42/konsole-kontinue"
+Source = "https://github.com/lonk42/konsole-kontinue"
+Issues = "https://github.com/lonk42/konsole-kontinue/issues"
 
 [project.scripts]
 kontinue = "kontinue.cli:main"
