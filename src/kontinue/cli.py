@@ -334,7 +334,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     # info level even without -v; a silent daemon is indistinguishable from a
     # dead one.
     logging.getLogger("kontinue").setLevel(
-        logging.DEBUG if args.verbose else logging.INFO
+        logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
     )
     return watch.Watcher(config).run()
 
