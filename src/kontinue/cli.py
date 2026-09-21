@@ -141,6 +141,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--generations", action="store_true",
         help="list retained older arrangements instead of showing a snapshot",
     )
+    show.add_argument(
+        "--generation", type=int, default=0, metavar="N",
+        help="show retained arrangement N, numbered as --generations lists them",
+    )
 
     install = subcommands.add_parser(
         "install", parents=[common],
@@ -343,15 +347,26 @@ def cmd_show(args: argparse.Namespace) -> int:
     if args.generations:
         return show_generations()
 
-    path = args.path or default_state_path()
-    try:
-        loaded = model.Snapshot.loads(path.read_text())
-    except FileNotFoundError:
-        log.error("no snapshot at %s", path)
-        return 1
-    except model.SchemaError as exc:
-        log.error("%s", exc)
-        return 1
+    if args.generation:
+        if args.path is not None:
+            log.error("give a path or --generation, not both")
+            return 1
+        try:
+            loaded, _ = generations.load(default_state_path(), args.generation)
+        except (FileNotFoundError, ValueError) as exc:
+            # ValueError covers SchemaError too.
+            log.error("%s", exc)
+            return 1
+    else:
+        path = args.path or default_state_path()
+        try:
+            loaded = model.Snapshot.loads(path.read_text())
+        except FileNotFoundError:
+            log.error("no snapshot at %s", path)
+            return 1
+        except model.SchemaError as exc:
+            log.error("%s", exc)
+            return 1
 
     print(f"captured {loaded.captured_at}")
     for instance in loaded.instances:
@@ -383,10 +398,12 @@ def show_generations() -> int:
             f"{index}  captured {loaded.captured_at}  "
             f"{loaded.pane_count()} pane(s) across {loaded.tab_count()} tab(s)"
         )
+        print(f"   {generations.describe(loaded)}")
     # stdout, like the listing above it: sending the two to different streams
     # puts the hint before the list whenever the output is piped, because only
     # one of them is block-buffered.
-    print("\nrestore one with: kontinue restore --generation N")
+    print("\nlook inside one with: kontinue show --generation N")
+    print("restore one with:     kontinue restore --new-window --generation N")
     return 0
 
 
@@ -489,6 +506,22 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     kept = generations.listing(state)
     print(f"generations: {len(kept)} retained")
+    bigger = generations.outgrown(state, loaded)
+    if bigger is not None:
+        # The one sign of a lost session anything can see: something small was
+        # saved over something large. It may have been meant, so it is said
+        # rather than acted on.
+        index, generation = bigger
+        current = loaded.pane_count() if loaded is not None else 0
+        print(
+            f"             generation {index} holds {generation.pane_count()} pane(s), "
+            f"the current snapshot {current}"
+        )
+        print(f"             ({generations.describe(generation)})")
+        print(
+            "             if that session was lost:  "
+            f"kontinue restore --new-window --generation {index}"
+        )
 
     store_dir = default_scrollback_dir()
     if store_dir.is_dir():

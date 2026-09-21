@@ -167,20 +167,32 @@ class Window:
 
 @dataclass
 class Instance:
-    """One Konsole process. The pid is recorded for debugging only - it is
-    meaningless after a restart and must never be used to match on restore."""
+    """One Konsole process.
+
+    The pid is never used to match panes on restore: it is meaningless after a
+    restart. Together with ``start_time`` it does answer one question, which is
+    whether the Konsole this was captured from is still running, and so whether
+    the snapshot describes a session that has ended. ``start_time`` is absent
+    from snapshots written before it was recorded.
+    """
 
     pid: int
     windows: list[Window] = field(default_factory=list)
+    start_time: int | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {"pid": self.pid, "windows": [window.to_json() for window in self.windows]}
+        payload: dict[str, Any] = {"pid": self.pid}
+        if self.start_time is not None:
+            payload["start_time"] = self.start_time
+        payload["windows"] = [window.to_json() for window in self.windows]
+        return payload
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> Instance:
         return cls(
             pid=payload["pid"],
             windows=[Window.from_json(window) for window in payload.get("windows", [])],
+            start_time=payload.get("start_time"),
         )
 
 
@@ -207,6 +219,15 @@ class Snapshot:
 
     def tab_count(self) -> int:
         return sum(len(window.tabs) for instance in self.instances for window in instance.windows)
+
+    def panes(self) -> list[Pane]:
+        return [
+            pane
+            for instance in self.instances
+            for window in instance.windows
+            for tab in window.tabs
+            for pane in _walk_panes(tab.root)
+        ]
 
     def to_json(self) -> dict[str, Any]:
         return {

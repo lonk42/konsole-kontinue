@@ -200,3 +200,76 @@ def referenced_inodes(state_path: Path) -> set[int]:
             continue
         inodes |= snapshot_mod.live_scrollback_inodes(loaded)
     return inodes
+
+
+def describe(snapshot: model.Snapshot, limit: int = 6) -> str:
+    """Say where a snapshot's panes were, well enough to recognise it.
+
+    Pane counts alone do not tell one working day from another, but the
+    directories the panes were in usually do, as do any tabs the user named.
+    """
+    counts: dict[str, int] = {}
+    named: list[str] = []
+    for pane in snapshot.panes():
+        place = (Path(pane.cwd).name or pane.cwd) if pane.cwd else "?"
+        counts[place] = counts.get(place, 0) + 1
+        title = pane.local_title_format
+        # A title with no placeholders is one the user typed in; the default
+        # formats say nothing a directory does not already say.
+        if title and "%" not in title and title not in named:
+            named.append(title)
+
+    places = sorted(counts.items(), key=lambda item: -item[1])
+    parts = [f"{place} ({count})" if count > 1 else place for place, count in places[:limit]]
+    if len(places) > limit:
+        parts.append(f"+{len(places) - limit} more")
+    text = ", ".join(parts)
+    if named:
+        text += "; named: " + ", ".join(named[:limit])
+    return text
+
+
+# How recent a generation has to be for status to hold it up against the
+# current snapshot. Older ones are likelier a deliberate change than a loss.
+OUTGROWN_WINDOW_SECONDS = 3 * 24 * 60 * 60
+
+
+def outgrown(
+    state_path: Path,
+    current: model.Snapshot | None,
+    window: float = OUTGROWN_WINDOW_SECONDS,
+) -> tuple[int, model.Snapshot] | None:
+    """A recent generation much bigger than the current snapshot, if any.
+
+    That shape is what a lost session looks like: something saved a small new
+    arrangement over a large one. Closing a tab or two is not it, so this wants
+    at least twice the panes and at least three more. Returns the generation's
+    number, as ``restore --generation`` takes it, and the generation.
+
+    The newest one that qualifies wins rather than the biggest, because the
+    lost session is the last large one, not whichever was largest that day.
+    """
+    current_panes = current.pane_count() if current is not None else 0
+    reference = _captured(current) if current is not None else None
+
+    for index, path in enumerate(listing(state_path), start=1):
+        try:
+            loaded = model.Snapshot.loads(path.read_text())
+        except (OSError, ValueError, KeyError):
+            continue
+        moment = _captured(loaded)
+        if reference is not None and moment is not None:
+            if (reference - moment).total_seconds() > window:
+                continue
+        panes = loaded.pane_count()
+        if panes >= 2 * current_panes and panes - current_panes >= 3:
+            return index, loaded
+    return None
+
+
+def _captured(snapshot: model.Snapshot) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(snapshot.captured_at)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)

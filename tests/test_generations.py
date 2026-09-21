@@ -195,3 +195,104 @@ def test_a_clock_going_backwards_does_not_archive(state: Path) -> None:
 
     write_current(state, base - timedelta(hours=3))
     assert generations.retain(state, force=True) is None
+
+
+def wide_snapshot(
+    captured_at: datetime, dirs: list[str], titles: list[str] | None = None
+) -> model.Snapshot:
+    """One tab per directory, the shape a working session usually has."""
+    titles = titles or ["%d : %n"] * len(dirs)
+    tabs = [
+        model.Tab(
+            root=model.Pane(view_id=i, session_id=i + 1, cwd=cwd, local_title_format=title),
+            raw_hierarchy=f"({i})[{i}]",
+        )
+        for i, (cwd, title) in enumerate(zip(dirs, titles))
+    ]
+    window = model.Window(window_id=1, tabs=tabs)
+    return model.Snapshot(
+        captured_at=captured_at.isoformat(timespec="seconds"),
+        instances=[model.Instance(pid=123, windows=[window])],
+    )
+
+
+def archive(state: Path, snap: model.Snapshot) -> None:
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(snap.dumps())
+    assert generations.retain(state, force=True) is not None
+
+
+def test_describe_names_directories_by_how_many_panes_were_in_them() -> None:
+    moment = datetime(2026, 9, 21, 14, 10, tzinfo=timezone.utc)
+    snap = wide_snapshot(
+        moment,
+        ["/config/scrub", "/config/git/QRCatcher", "/config/git/QRCatcher", "/tmp"],
+        ["%d : %n", "Data seeder", "%d : %n", "%d : %n"],
+    )
+
+    assert generations.describe(snap) == (
+        "QRCatcher (2), scrub, tmp; named: Data seeder"
+    )
+
+
+def test_describe_caps_a_long_list() -> None:
+    moment = datetime(2026, 9, 21, 14, 10, tzinfo=timezone.utc)
+    snap = wide_snapshot(moment, [f"/d{i}" for i in range(9)])
+
+    assert generations.describe(snap, limit=3) == "d0, d1, d2, +6 more"
+
+
+def test_a_session_saved_over_by_a_small_one_is_flagged(state: Path) -> None:
+    """The shape of the loss that prompted this: ten tabs, then one."""
+    before = datetime(2026, 9, 21, 14, 10, tzinfo=timezone.utc)
+    archive(state, wide_snapshot(before, [f"/d{i}" for i in range(10)]))
+    archive(state, wide_snapshot(before + timedelta(hours=8), ["/d0"]))
+    current = wide_snapshot(before + timedelta(hours=8, minutes=3), ["/d0", "/d1"])
+
+    found = generations.outgrown(state, current)
+
+    assert found is not None
+    index, generation = found
+    assert index == 2
+    assert generation.pane_count() == 10
+
+
+def test_closing_a_few_tabs_is_not_flagged(state: Path) -> None:
+    before = datetime(2026, 9, 21, 14, 10, tzinfo=timezone.utc)
+    archive(state, wide_snapshot(before, [f"/d{i}" for i in range(12)]))
+    current = wide_snapshot(before + timedelta(hours=1), [f"/d{i}" for i in range(9)])
+
+    assert generations.outgrown(state, current) is None
+
+
+def test_an_old_large_generation_is_not_flagged(state: Path) -> None:
+    """A week-old arrangement is likelier a deliberate change than a loss."""
+    before = datetime(2026, 9, 10, 14, 10, tzinfo=timezone.utc)
+    archive(state, wide_snapshot(before, [f"/d{i}" for i in range(10)]))
+    current = wide_snapshot(before + timedelta(days=7), ["/d0"])
+
+    assert generations.outgrown(state, current) is None
+
+
+def test_with_no_current_snapshot_any_sizeable_generation_is_flagged(state: Path) -> None:
+    archive(state, wide_snapshot(datetime(2026, 9, 21, tzinfo=timezone.utc),
+                                 ["/a", "/b", "/c"]))
+
+    found = generations.outgrown(state, None)
+
+    assert found is not None and found[0] == 1
+
+
+def test_the_newest_large_generation_is_the_one_flagged(state: Path) -> None:
+    """The lost session is the last big one, not the biggest of the day."""
+    morning = datetime(2026, 9, 21, 11, 0, tzinfo=timezone.utc)
+    archive(state, wide_snapshot(morning, [f"/d{i}" for i in range(12)]))
+    archive(state, wide_snapshot(morning + timedelta(hours=3), [f"/d{i}" for i in range(10)]))
+    archive(state, wide_snapshot(morning + timedelta(hours=11), ["/d0"]))
+    current = wide_snapshot(morning + timedelta(hours=11, minutes=1), ["/d0"])
+
+    found = generations.outgrown(state, current)
+
+    assert found is not None
+    assert found[0] == 2
+    assert found[1].pane_count() == 10

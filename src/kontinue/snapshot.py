@@ -69,7 +69,11 @@ def capture_instance(
         window = capture_window(instance, window_id, probe=probe, store=store, stats=stats)
         if window.tabs:
             windows.append(window)
-    return model.Instance(pid=instance.pid, windows=windows)
+    return model.Instance(
+        pid=instance.pid,
+        windows=windows,
+        start_time=konsole.read_start_time(instance.pid),
+    )
 
 
 def capture_window(

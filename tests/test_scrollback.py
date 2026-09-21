@@ -409,7 +409,10 @@ def test_an_existing_loose_directory_is_tightened(tmp_path: Path) -> None:
     listing names one file per pane and its size.
     """
     root = tmp_path / "scrollback"
-    root.mkdir(mode=0o755)
+    root.mkdir()
+    # chmod, not mkdir's mode, which the umask filters: under a umask of 077
+    # the directory would start out private and the test would prove nothing.
+    root.chmod(0o755)
     assert root.stat().st_mode & 0o077
 
     ensure_private_dir(root)

@@ -63,6 +63,7 @@ Watch takes a fresh snapshot every interval, so the interval is how much you can
 **Auto-restore when the first Konsole opens.**
 If no Konsole is running and a new one starts, kontinue restores into it.
 Closing them all arms it again for next time.
+A watcher started after that first Konsole opened, such as one launched from `~/.bashrc`, restores into it too, provided the saved session has ended.
 
 ## Usage
 
@@ -79,6 +80,7 @@ kontinue restore --new-window    # Rebuild into a fresh Konsole rather than the 
 kontinue watch                   # Save on a timer, and restore when Konsole next opens
 kontinue show [PATH]             # Print a saved snapshot as a readable tree
 kontinue show --generations      # List older arrangements that were kept
+kontinue show --generation N     # Print one of them as a tree
 kontinue restore --generation N  # Rebuild one of them
 kontinue prune                   # Drop scrollback for panes you closed
 kontinue install                 # Start the watcher when you log in
@@ -121,6 +123,8 @@ scrollback:  12.4 MB in ~/.local/state/kontinue/scrollback
 konsole:     1 running
 ```
 
+If a recent generation holds far more panes than the current snapshot, `status` names it and prints the command to restore it.
+
 ## Older arrangements
 
 The snapshot is overwritten every time the timer fires.
@@ -129,9 +133,12 @@ If you close the wrong window, restore an older one:
 ```console
 $ kontinue show --generations
 1  captured 2026-08-20T02:18:38+00:00  6 pane(s) across 4 tab(s)
+   myproject (3), you (2), notes
 2  captured 2026-08-19T21:04:11+00:00  14 pane(s) across 9 tab(s)
+   myproject (6), infra (4), you (3), logs; named: build
 
-restore one with: kontinue restore --generation N
+look inside one with: kontinue show --generation N
+restore one with:     kontinue restore --new-window --generation N
 ```
 
 One is kept when the last Konsole exits, being the closing state of a finished session,

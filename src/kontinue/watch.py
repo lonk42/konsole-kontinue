@@ -22,11 +22,21 @@ rather than an occasion, and it cannot fire twice for one session: after the
 first restore there is a Konsole running, so the next one to open is not the
 first. Opening a second terminal is left alone, which is what anyone opening a
 second terminal wants.
+
+**A watcher can start after the first Konsole has opened**, and on a desktop
+with no session manager it usually does: started from a shell's rc file, it
+runs inside the very Konsole the user just opened. The transition has already
+happened by then, so the startup has to look for it instead. The test is
+whether the Konsole the snapshot was captured from is still running. If it is
+not, the saved session has ended, the Konsole running now is a new one, and the
+watcher treats it as though it had seen it appear. Without this, the first
+timer save overwrites the finished session with the fresh one.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,12 +88,14 @@ class Watcher:
     # -- lifecycle -------------------------------------------------------
 
     def run(self) -> int:
-        self.known = {instance.service for instance in konsole.discover(self.bus)}
+        running = konsole.discover(self.bus)
+        self.known = {instance.service for instance in running}
         log.info(
             "watching; %d konsole(s) running, snapshotting every %ds",
             len(self.known),
             self.config.interval,
         )
+        self.resume(running)
 
         self.bus.add_signal_receiver(
             self._on_name_owner_changed,
@@ -92,13 +104,65 @@ class Watcher:
         )
         GLib.timeout_add_seconds(self.config.interval, self._on_tick)
 
-        # A Konsole already open when the watcher starts is not a zero-to-one
-        # transition, so this never restores over a session already in progress.
         try:
             self.loop.run()
         except KeyboardInterrupt:
             log.info("stopping")
         return 0
+
+    def resume(self, running: list[konsole.Instance]) -> None:
+        """Catch a zero-to-one transition that happened before the watcher did.
+
+        A Konsole running at startup is only restored into when the saved
+        session has certainly ended, since otherwise it may be that session,
+        and restoring over it would be the worst thing this could do. Anything
+        in doubt leaves it alone, which costs a restore by hand at most.
+        """
+        saved = self._load_saved()
+        if saved is None or not session_ended(saved, running):
+            return
+
+        # The session on disk is over, and the next timer save replaces it.
+        # Normally it was archived as its last Konsole exited, but a watcher
+        # that died with the desktop never saw that happen.
+        self._retain_generation("the saved session has ended")
+
+        if not running or not self.config.auto_restore:
+            return
+        if len(running) > 1:
+            log.info(
+                "%d konsoles opened before the watcher started; not restoring "
+                "over them (kontinue restore --new-window does it by hand)",
+                len(running),
+            )
+            return
+        if has_controlling_terminal():
+            # Restoring retires the Konsole in front of the user, and if the
+            # watcher was started from a shell in it, the hangup takes the
+            # watcher down with it.
+            log.info(
+                "started from a terminal, so not restoring into it; "
+                "kontinue restore --new-window does it by hand"
+            )
+            return
+
+        name = running[0].service
+        log.info(
+            "%s opened before the watcher started, and the session saved at %s "
+            "has ended; considering a restore",
+            name,
+            saved.captured_at,
+        )
+        GLib.timeout_add(int(self.config.settle * 1000), self._try_restore, name)
+
+    def _load_saved(self) -> model.Snapshot | None:
+        try:
+            return model.Snapshot.loads(self.config.state_path.read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, KeyError) as exc:
+            log.debug("saved snapshot unreadable at startup: %s", exc)
+            return None
 
     # -- saving ----------------------------------------------------------
 
@@ -165,7 +229,7 @@ class Watcher:
                 # The last one has gone, so the snapshot on disk is the closing
                 # state of a finished session. That is what anybody means by
                 # "the previous session", so it is kept whatever its age.
-                self._retain_generation()
+                self._retain_generation("no konsole left")
             return
         if name in self.known:
             return
@@ -224,6 +288,11 @@ class Watcher:
                 )
                 if report.panes:
                     self._retire(instance)
+                # The Konsole the restore launched claimed its name while this
+                # ran, and that signal is still queued behind it. Marking it
+                # known now means it is not mistaken for a first Konsole, and
+                # restored into again, once the queue drains.
+                self.known |= {each.service for each in konsole.discover(self.bus)}
         except lock.Busy:
             log.debug("a restore is already running; not starting another")
             return None
@@ -233,7 +302,7 @@ class Watcher:
         log.info("%s", report.summary())
         return report
 
-    def _retain_generation(self) -> None:
+    def _retain_generation(self, reason: str) -> None:
         """Archive the current snapshot now that the session behind it is over."""
         if not self.config.keep_generations:
             return
@@ -247,7 +316,7 @@ class Watcher:
             log.warning("could not keep the finished session: %s", exc)
             return
         if kept is not None:
-            log.info("no konsole left; kept that session as %s", kept.name)
+            log.info("%s; kept that session as %s", reason, kept.name)
 
     def _retire(self, instance: konsole.Instance) -> None:
         """Close the empty Konsole the restored one replaces.
@@ -267,6 +336,36 @@ class Watcher:
             if instance.service == name:
                 return instance
         return None
+
+
+def session_ended(saved: model.Snapshot, running: list[konsole.Instance]) -> bool:
+    """Whether no Konsole the snapshot was captured from is still running.
+
+    Matched on pid and start time, since pids are recycled. Snapshots from
+    before the start time was recorded match on pid alone, which errs towards
+    "still running" and so towards leaving things alone.
+    """
+    if not saved.instances:
+        return False
+    alive = {(each.pid, konsole.read_start_time(each.pid)) for each in running}
+    alive_pids = {pid for pid, _ in alive}
+    for instance in saved.instances:
+        if instance.start_time is None:
+            if instance.pid in alive_pids:
+                return False
+        elif (instance.pid, instance.start_time) in alive:
+            return False
+    return True
+
+
+def has_controlling_terminal() -> bool:
+    """Whether a hangup on some terminal would reach this process."""
+    try:
+        fd = os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY)
+    except OSError:
+        return False
+    os.close(fd)
+    return True
 
 
 def is_untouched(instance: konsole.Instance) -> bool:
